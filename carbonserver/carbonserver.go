@@ -332,6 +332,31 @@ func (listener *CarbonserverListener) fileListUpdater(dir string, tick <-chan ti
 	}
 }
 
+/*
+This is temporary workaround in order to mitigate the following issue: https://github.com/lomik/go-carbon/issues/186
+
+In particular deferring the index unlock in a separate method prevents the lock on the index to be held when a panic
+is generated
+*/
+func (listener *CarbonserverListener) updateAccessedMetrics(details map[string]*pb.MetricDetails) map[string]struct{} {
+	fidx := listener.CurrentFileIndex()
+	accessedMetrics := make(map[string]struct{})
+	if fidx != nil {
+		fidx.Lock()
+		defer fidx.Unlock()
+		for m := range fidx.accessedMetrics {
+			accessedMetrics[m] = struct{}{}
+		}
+
+		for m := range fidx.accessedMetrics {
+			if d, ok := details[m]; ok {
+				d.RdTime = fidx.details[m].RdTime
+			}
+		}
+	}
+	return accessedMetrics
+}
+
 func (listener *CarbonserverListener) updateFileList(dir string) {
 	logger := listener.logger.With(zap.String("handler", "fileListUpdated"))
 	defer func() {
@@ -405,21 +430,9 @@ func (listener *CarbonserverListener) updateFileList(dir string) {
 	pruned := idx.Prune(0.95)
 
 	tl := time.Now()
-	fidx := listener.CurrentFileIndex()
-	accessedMetrics := make(map[string]struct{})
-	if fidx != nil {
-		fidx.Lock()
-		for m := range fidx.accessedMetrics {
-			accessedMetrics[m] = struct{}{}
-		}
 
-		for m := range fidx.accessedMetrics {
-			if d, ok := details[m]; ok {
-				d.RdTime = fidx.details[m].RdTime
-			}
-		}
-		fidx.Unlock()
-	}
+	//update accessed metrics is performed in a separate method
+	accessedMetrics := listener.updateAccessedMetrics(details)
 	rdTimeUpdateRuntime := time.Since(tl)
 
 	listener.UpdateFileIndex(&fileIndex{
